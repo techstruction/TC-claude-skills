@@ -85,3 +85,54 @@ No API key needed. No browser needed. Works headless on any server.
 - Read `MASTERPLAN.md` for full design rationale
 - Read `DECISIONS.md` for why specific tools were chosen
 - Read `HANDOFF.md` before giving OpenClaw autonomous access
+
+---
+
+## Phase 4: Fallback Recovery (for `no_transcript` episodes)
+
+85 episodes couldn't be reached via YouTube API (Oracle Cloud IP blocked) or podcast RSS
+(pre-2022 episodes). Phase 4 uses three alternative sources with no external API keys.
+
+### Install (Source B + C)
+```bash
+pip install playwright playwright-stealth
+playwright install chromium          # ~150MB ARM64 Chromium
+
+pip install faster-whisper           # Source C only — opt-in
+```
+
+### Quick Commands
+```bash
+# Step 1: Try yt-dlp subtitle download first (free, fast, different CDN path)
+python execution/04_fetch_fallback.py --method ytdlp-subs --count 2
+
+# Step 2: Try Playwright browser automation (our own supadata-like implementation)
+python execution/04_fetch_fallback.py --method playwright --count 1
+
+# Step 3: Whisper — enable in config/fallback.json first, then:
+python execution/04_fetch_fallback.py --method whisper --count 1
+
+# Auto mode (tries all enabled sources per episode, in order)
+python execution/04_fetch_fallback.py --count 2
+
+# With longer delay between episodes (recommended for playwright)
+python execution/04_fetch_fallback.py --method playwright --count 2 --delay 60
+```
+
+### Fallback Source Priority
+| Source | Method | API Key | Speed | Notes |
+|--------|--------|---------|-------|-------|
+| A | `ytdlp-subs` | None | Fast | Different CDN path — try first |
+| B | `playwright` | None | ~30s/ep | Headless Chrome + stealth mode |
+| C | `whisper` | None | ~10min/ep | Audio download + local transcription |
+
+### Scheduling (post-test)
+- If ytdlp-subs works: `--count 2` every 5 min → done in ~3.5 hrs
+- If blocked, use playwright: `--count 2` every 10 min → done in ~7 hrs
+- Whisper as last resort: `--count 1` every 45 min → done in ~64 hrs
+
+### Log Files
+| File | Purpose |
+|---|---|
+| `.tmp/fallback.log` | Append-only fallback run log |
+| `config/fallback.json` | Source enable/disable, default settings |

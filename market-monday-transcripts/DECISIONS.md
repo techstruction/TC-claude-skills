@@ -33,6 +33,30 @@ OpenClaw can read/write it easily. Easy to inspect in any spreadsheet app.
 **Why:** Episode titles don't always contain a reliable episode number. Playlist order is authoritative.
 Transcript files are named `EP{num:04d}_{slug}.md` using this index.
 
+### D7: yt-dlp subtitle download as Source A for fallback (Phase 4)
+**Decision:** First fallback attempts `yt-dlp --write-auto-sub` to download VTT subtitle files.
+**Why:** yt-dlp fetches subtitle files from YouTube's CDN (`googlevideo.com`) — a different request
+path than the `timedtext` transcript API endpoint that Oracle Cloud IPs are blocked from.
+No API key, no install beyond yt-dlp which is already present. Costs nothing to try first.
+**Trade-off:** May still be blocked on some IPs; if so, falls through to Source B.
+
+### D8: Playwright + stealth as Source B — no third-party API
+**Decision:** Build our own headless Chromium automation rather than using paid services
+(supadata.ai, noteGPT.io, turboscribe.ai etc.).
+**Why:** All those services do the same thing under the hood: headless browser + stealth mode
+triggers YouTube's internal `/youtubei/v1/get_transcript` XHR and captures the JSON.
+Building it ourselves means no API keys, no freemium limits, no third-party dependency.
+Playwright + playwright-stealth on ARM64 is fully supported.
+**Trade-off:** ~400MB RAM per browser instance; ~30-40s per episode vs instant API call.
+Acceptable given we run 1-2 at a time on a scheduled interval.
+
+### D9: faster-whisper over openai-whisper for Source C
+**Decision:** Use `faster-whisper` (CTranslate2 backend) with `int8` quantization.
+**Why:** int8 quantization is significantly faster on ARM64 CPU with no CUDA.
+Lower memory footprint than float32. Same transcription quality for the `base` model.
+Disabled by default because it's CPU-heavy; user opts in via `config/fallback.json`.
+**Trade-off:** Slightly reduced accuracy vs float32 — acceptable for this use case.
+
 ### D6: No Claude API calls during batch runs
 **Decision:** The batch runner scripts do not call Claude or any LLM.
 **Why:** Goal is "don't consume a lot of tokens." Transcripts are fetched raw and saved as-is.

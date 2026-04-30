@@ -20,13 +20,23 @@ market-monday-transcripts/
   CLAUDE.md                 # Project constitution
   HANDOFF.md                # Handoff doc for OpenClaw
   DECISIONS.md              # Decision log
+  config/
+    fallback.json           # Phase 4 source config and rate limit defaults
   execution/
     01_fetch_playlist.py    # Phase 1: build master_list.csv from playlist
-    02_fetch_batch.py       # Phase 2: fetch N transcripts, update CSV, save MDs
+    02_fetch_batch.py       # Phase 2: fetch N transcripts via YouTube transcript API
     03_status_report.py     # Anytime: print progress summary
+    04_fetch_fallback.py    # Phase 4: fallback recovery for no_transcript episodes
+    lib/
+      source_ytdlp_subs.py  # Source A: yt-dlp VTT subtitle download
+      source_playwright.py  # Source B: Playwright + stealth headless browser
+      source_whisper.py     # Source C: audio download + faster-whisper (opt-in)
   data/
-    master_list.csv         # Master checklist (created by 01_, updated by 02_)
+    master_list.csv         # Master checklist (created by 01_, updated by all phases)
   transcripts/              # EP0001_title-slug.md, EP0002_..., etc.
+  .tmp/
+    batch.log               # Phase 2 run log
+    fallback.log            # Phase 4 run log
 ```
 
 ---
@@ -115,6 +125,48 @@ pip install yt-dlp youtube-transcript-api
 - Episode count may grow — re-run `01_fetch_playlist.py` to append new episodes
 - Do NOT re-run `01_fetch_playlist.py` if `master_list.csv` already has progress
   → It appends new entries, never overwrites existing rows
+
+---
+
+### Phase 4 — Fallback Recovery (for `no_transcript` episodes)
+
+85 episodes have `status=no_transcript` — not because they lack captions, but because
+Oracle Cloud IP is blocked from the YouTube transcript API, and the podcast RSS didn't
+cover those episodes. Phase 4 recovers them via three sources, tried in order per episode:
+
+**Source A — yt-dlp subtitle download** (different CDN path, free, try first)
+```bash
+python execution/04_fetch_fallback.py --method ytdlp-subs --count 2
+```
+
+**Source B — Playwright + stealth** (headless Chrome, mimics what paid services do)
+```bash
+python execution/04_fetch_fallback.py --method playwright --count 1
+```
+
+**Source C — faster-whisper** (audio download + local ARM64 transcription, opt-in)
+```bash
+# Enable in config/fallback.json first, then:
+python execution/04_fetch_fallback.py --method whisper --count 1
+```
+
+**Auto mode** (tries A → B → C per episode, stops at first success):
+```bash
+python execution/04_fetch_fallback.py --count 2
+```
+
+The `notes` column in master_list.csv tracks which methods were tried per episode,
+making all runs idempotent. On success, `status` updates to `done`.
+
+Scheduling strategy (recommended):
+| Step | Method | Count | Interval | Est. time |
+|------|--------|-------|----------|-----------|
+| 4a | ytdlp-subs | 2 | 5 min | ~3.5 hrs |
+| 4b | playwright | 2 | 10 min | ~7 hrs |
+| 4c | whisper | 1 | 45 min | ~64 hrs |
+
+Start with ytdlp-subs manually on 5 episodes to confirm it's not blocked. If blocked,
+go straight to playwright.
 
 ---
 

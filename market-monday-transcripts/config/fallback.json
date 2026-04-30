@@ -1,0 +1,10 @@
+{
+  "default_method": "auto",
+  "default_count": 2,
+  "default_delay_seconds": 30,
+  "sources": {
+    "ytdlp-subs": { "enabled": true },
+    "playwright":  { "enabled": true },
+    "whisper":     { "enabled": false, "model": "base" }
+  }
+}
