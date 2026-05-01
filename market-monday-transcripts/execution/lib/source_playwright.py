@@ -1,32 +1,40 @@
 """
 source_playwright.py
-Source B: Headless Chromium browser automation via Playwright + stealth mode.
+Source B: Headless Chromium + authenticated YouTube session via cookies.
 
-Replicates what paid transcript services (supadata.ai, noteGPT.io, etc.) do under
-the hood: launch a real browser with masked automation signals, navigate to the YouTube
-video, intercept the /youtubei/v1/get_transcript XHR that fires when the transcript
-panel opens, and capture the structured JSON response.
+Flow:
+1. Load YouTube cookies from cookies.txt into the browser context
+2. Navigate to the video, expand the description
+3. Scroll the "Show transcript" button into the viewport
+4. Click it with page.mouse to trigger the /youtubei/v1/get_panel XHR
+5. Parse transcript segments from macroMarkersPanelItemViewModel
 
-This bypasses Oracle Cloud IP blocks because the request looks identical to a real
-human using Chrome — not a scripted API call.
+The cookies bypass Oracle Cloud's IP block (browser sessions aren't blocked the way
+direct API calls are). get_panel returns 1000+ transcript segment view-models in one shot.
 
-Install: pip install playwright playwright-stealth
-         playwright install chromium
+Cookies file: ~/.claude/skills/market-monday-transcripts/cookies.txt
+Install: pip install playwright playwright-stealth && playwright install chromium
 """
 
-import json
-import threading
+import http.cookiejar
+import os
 import time
 
 YOUTUBE_BASE = "https://www.youtube.com"
-XHR_PATH = "/youtubei/v1/get_transcript"
-PAGE_TIMEOUT_MS = 45_000
-XHR_WAIT_SECONDS = 30
+PAGE_LOAD_SLEEP = 5
+EXPAND_SLEEP = 2
+SCROLL_SLEEP = 1
+RESPONSE_TIMEOUT_MS = 20_000
+
+_COOKIES_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "cookies.txt",
+)
 
 
 def fetch(video_id):
     """
-    Use headless Chromium to extract a YouTube transcript via XHR interception.
+    Use headless Chromium with YouTube cookies to extract transcript via get_panel XHR.
     Returns (text, None) on success, (None, error_str) on failure.
     """
     try:
@@ -35,160 +43,157 @@ def fetch(video_id):
         return None, "playwright_not_installed"
 
     try:
-        from playwright_stealth import stealth_sync
-        _has_stealth = True
+        from playwright_stealth import Stealth
+        _stealth = Stealth()
     except ImportError:
-        _has_stealth = False
+        _stealth = None
+
+    # Load YouTube cookies
+    pw_cookies = _load_cookies()
+    if not pw_cookies:
+        return None, "playwright:no_cookies_file"
 
     url = f"{YOUTUBE_BASE}/watch?v={video_id}"
-    captured = {"data": None, "event": threading.Event()}
-
-    def _on_response(response):
-        if XHR_PATH in response.url:
-            try:
-                captured["data"] = response.json()
-            except Exception:
-                pass
-            captured["event"].set()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-extensions",
-            ],
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
-        context = browser.new_context(
+        ctx = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             ),
             locale="en-US",
-            timezone_id="America/New_York",
+            viewport={"width": 1280, "height": 800},
         )
-        page = context.new_page()
-
-        if _has_stealth:
-            stealth_sync(page)
-
-        page.on("response", _on_response)
+        ctx.add_cookies(pw_cookies)
+        page = ctx.new_page()
+        if _stealth:
+            _stealth.apply_stealth_sync(page)
 
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
         except Exception as e:
             browser.close()
             return None, f"playwright:page_load_failed:{str(e)[:80]}"
 
-        # Try to open the transcript panel via the "More actions" button
-        transcript_opened = _open_transcript_panel(page)
+        time.sleep(PAGE_LOAD_SLEEP)
 
-        if transcript_opened:
-            # Wait for the XHR to fire
-            captured["event"].wait(timeout=XHR_WAIT_SECONDS)
+        # Expand description to reveal the Show transcript button
+        page.evaluate("() => document.querySelector('tp-yt-paper-button#expand')?.click()")
+        time.sleep(EXPAND_SLEEP)
 
-        if captured["data"]:
-            text = _parse_transcript_json(captured["data"])
+        # Scroll the Show transcript button into the viewport
+        page.evaluate(
+            "() => { "
+            "const b = Array.from(document.querySelectorAll(\"button[aria-label='Show transcript']\")"
+            ").find(b => b.offsetParent !== null); "
+            "if (b) b.scrollIntoView({behavior: 'instant', block: 'center'}); "
+            "}"
+        )
+        time.sleep(SCROLL_SLEEP)
+
+        # Get the button's viewport position
+        rect = page.evaluate(
+            "() => { "
+            "const b = Array.from(document.querySelectorAll(\"button[aria-label='Show transcript']\")"
+            ").find(b => b.offsetParent !== null); "
+            "return b ? b.getBoundingClientRect() : null; "
+            "}"
+        )
+
+        if not rect or not (0 <= rect["y"] <= 750) or rect["width"] == 0:
             browser.close()
-            if text:
-                return text, None
-            return None, "playwright:empty_transcript_json"
+            return None, "playwright:transcript_button_not_in_viewport"
 
-        # XHR not captured — fall back to DOM scraping of rendered segments
-        text = _extract_from_dom(page)
+        cx = rect["x"] + rect["width"] / 2
+        cy = rect["y"] + rect["height"] / 2
+
+        # Use expect_response to properly capture the get_panel XHR response
+        try:
+            with page.expect_response(
+                lambda r: "/youtubei/v1/get_panel" in r.url and r.status == 200,
+                timeout=RESPONSE_TIMEOUT_MS,
+            ) as resp_info:
+                page.mouse.move(cx, cy)
+                time.sleep(0.2)
+                page.mouse.click(cx, cy)
+
+            response = resp_info.value
+            data = response.json()
+        except Exception as e:
+            browser.close()
+            return None, f"playwright:get_panel_failed:{str(e)[:100]}"
+
         browser.close()
 
-        if text:
-            return text, None
-        return None, "playwright:no_transcript_found"
+    text = _parse_get_panel(data)
+    if text:
+        return text, None
+    return None, "playwright:empty_panel_response"
 
 
-def _open_transcript_panel(page):
-    """Click the transcript button. Returns True if the panel was triggered."""
+def _load_cookies():
+    """Load YouTube cookies from Netscape cookies.txt into Playwright format."""
+    if not os.path.exists(_COOKIES_PATH):
+        return []
+    jar = http.cookiejar.MozillaCookieJar()
     try:
-        # Dismiss cookie consent if present
-        page.locator("button[aria-label*='Accept']").click(timeout=3000)
+        jar.load(_COOKIES_PATH, ignore_discard=True, ignore_expires=True)
     except Exception:
-        pass
-
-    # Scroll down slightly so the video controls are visible
-    page.evaluate("window.scrollBy(0, 300)")
-    time.sleep(1)
-
-    # Try the "More actions" (...) button below the video title
-    for selector in [
-        "button[aria-label='More actions']",
-        "#above-the-fold button[aria-label]",
-        "ytd-menu-renderer button",
-    ]:
-        try:
-            page.locator(selector).first.click(timeout=4000)
-            time.sleep(0.8)
-            break
-        except Exception:
-            continue
-
-    # Click "Show transcript" / "Open transcript" menu item
-    for label in ["Show transcript", "Open transcript", "transcript"]:
-        try:
-            page.locator(f"text={label}").first.click(timeout=4000)
-            time.sleep(1.5)
-            return True
-        except Exception:
-            continue
-
-    return False
+        return []
+    return [
+        {
+            "name": c.name,
+            "value": c.value,
+            "domain": c.domain,
+            "path": c.path,
+            "secure": bool(c.secure),
+            "httpOnly": False,
+        }
+        for c in jar
+        if "youtube" in c.domain or "google" in c.domain
+    ]
 
 
-def _parse_transcript_json(data):
+def _parse_get_panel(data):
     """
-    Parse the /youtubei/v1/get_transcript JSON response.
-    The response contains nested 'transcriptBodyRenderer' with 'cueGroups'.
+    Parse the get_panel response.
+    Transcript segments live at:
+      content.engagementPanelSectionListRenderer.content.sectionListRenderer
+      .contents[0].itemSectionRenderer.contents[i]
+      .macroMarkersPanelItemViewModel.item.timelineItemViewModel
+      .contentItems[j].transcriptSegmentViewModel.simpleText
     """
     try:
-        actions = (
-            data.get("actions", [{}])[0]
-            .get("updateEngagementPanelAction", {})
+        section = (
+            data.get("content", {})
+            .get("engagementPanelSectionListRenderer", {})
             .get("content", {})
-            .get("transcriptRenderer", {})
-            .get("body", {})
-            .get("transcriptBodyRenderer", {})
-            .get("cueGroups", [])
+            .get("sectionListRenderer", {})
+            .get("contents", [{}])[0]
+            .get("itemSectionRenderer", {})
+            .get("contents", [])
         )
+
         lines = []
-        for group in actions:
-            cues = group.get("transcriptCueGroupRenderer", {}).get("cues", [])
-            for cue in cues:
-                runs = (
-                    cue.get("transcriptCueRenderer", {})
-                    .get("cue", {})
-                    .get("simpleText", "")
-                )
-                if runs:
-                    lines.append(runs.strip())
+        for item in section:
+            tl = (
+                item.get("macroMarkersPanelItemViewModel", {})
+                .get("item", {})
+                .get("timelineItemViewModel", {})
+                .get("contentItems", [])
+            )
+            for ci in tl:
+                text = ci.get("transcriptSegmentViewModel", {}).get("simpleText", "")
+                if text and text.strip():
+                    lines.append(text.strip())
 
         if not lines:
             return ""
 
-        chunks = [" ".join(lines[i:i + 5]) for i in range(0, len(lines), 5)]
-        return "\n\n".join(chunks)
-    except Exception:
-        return ""
-
-
-def _extract_from_dom(page):
-    """Fallback: scrape rendered transcript segments from the DOM."""
-    try:
-        page.wait_for_selector(
-            "ytd-transcript-segment-renderer", timeout=8000
-        )
-        elements = page.locator("ytd-transcript-segment-renderer .segment-text").all()
-        lines = [el.inner_text().strip() for el in elements if el.inner_text().strip()]
-        if not lines:
-            return ""
         chunks = [" ".join(lines[i:i + 5]) for i in range(0, len(lines), 5)]
         return "\n\n".join(chunks)
     except Exception:
