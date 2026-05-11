@@ -8,27 +8,25 @@ SKILL_DIR="/home/ubuntu/.claude/skills/market-monday-transcripts"
 VENV_PYTHON="${SKILL_DIR}/.venv/bin/python"
 CSV_PATH="${SKILL_DIR}/data/master_list.csv"
 REMOTE_BASE="onedrive:Backups/oracle-server/market-monday-transcripts"
-LOCKFILE="${SKILL_DIR}/.tmp/scheduled_run.lock"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 cd "${SKILL_DIR}"
 mkdir -p .tmp
 
-# --- Concurrency guard via lockfile ---
-# If lock exists and the PID inside it is still running, exit.
-# Otherwise, claim the lock with our PID.
-if [ -f "${LOCKFILE}" ]; then
-    LOCK_PID=$(cat "${LOCKFILE}" 2>/dev/null || echo "")
-    if [ -n "${LOCK_PID}" ] && kill -0 "${LOCK_PID}" 2>/dev/null; then
-        log "Another instance (PID ${LOCK_PID}) is already running. Exiting."
-        exit 0
-    else
-        log "Stale lockfile found (PID ${LOCK_PID} gone). Removing and continuing."
-        rm -f "${LOCKFILE}"
-    fi
+# Rotate log if over 1MB
+LOG_FILE="${SKILL_DIR}/.tmp/scheduled_run.log"
+if [ -f "${LOG_FILE}" ] && [ "$(stat -c%s "${LOG_FILE}")" -gt 1048576 ]; then
+    mv "${LOG_FILE}" "${LOG_FILE}.1"
 fi
-echo $$ > "${LOCKFILE}"
+
+# --- Concurrency guard: max 1 instance at a time (flock, race-free) ---
+LOCKFILE="${SKILL_DIR}/.tmp/scheduled_run.lock"
+exec 9>"${LOCKFILE}"
+if ! flock -n 9; then
+    log "Another instance is already running. Exiting."
+    exit 0
+fi
 trap 'rm -f "${LOCKFILE}"' EXIT
 
 # --- Daily masterlist refresh ---
@@ -48,13 +46,21 @@ else
 fi
 
 if [ "${REFRESH_NEEDED}" = "true" ]; then
-    "${VENV_PYTHON}" execution/01_fetch_playlist.py >> .tmp/playlist_refresh.log 2>&1
+    if ! "${VENV_PYTHON}" execution/01_fetch_playlist.py >> .tmp/playlist_refresh.log 2>&1; then
+        log "ERROR: Playlist refresh failed — see .tmp/playlist_refresh.log. Skipping batch."
+        exit 1
+    fi
     log "Playlist refresh complete"
 fi
 
 # --- Check for pending episodes ---
-# Use awk to check the 6th CSV field (status column) rather than grep to avoid false matches
-PENDING=$(awk -F',' 'NR>1 && $6=="pending"' "${CSV_PATH}" | wc -l)
+# Use Python's csv module (RFC 4180-aware) to count pending rows; awk with -F',' breaks on
+# quoted fields that contain commas (e.g. episode titles like "STOCKS AT ALL-TIME HIGHS… 1,400%…")
+PENDING=$("${VENV_PYTHON}" -c "
+import csv, sys
+with open(sys.argv[1]) as f:
+    print(sum(1 for r in csv.DictReader(f) if r.get('status')=='pending'))
+" "${CSV_PATH}")
 if [ "${PENDING}" -eq 0 ]; then
     log "No pending episodes. Nothing to do."
     exit 0
