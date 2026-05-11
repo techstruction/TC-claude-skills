@@ -35,11 +35,11 @@ ls transcripts/ | head -10
 
 ## How It Runs (Automated)
 
-A CRON job fires every 5 minutes and handles the full workflow automatically:
+A CRON job fires every Monday at 10 PM and handles the full workflow automatically:
 
 ```
-*/5 * * * * /home/ubuntu/.claude/skills/market-monday-transcripts/execution/05_scheduled_run.sh \
-            >> /home/ubuntu/.claude/skills/market-monday-transcripts/.tmp/scheduled_run.log 2>&1
+0 22 * * 1 /home/ubuntu/.claude/skills/market-monday-transcripts/execution/05_scheduled_run.sh \
+           >> /home/ubuntu/.claude/skills/market-monday-transcripts/.tmp/scheduled_run.log 2>&1
 ```
 
 `05_scheduled_run.sh` does the following in sequence:
