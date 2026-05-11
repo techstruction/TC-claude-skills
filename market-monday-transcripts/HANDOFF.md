@@ -33,18 +33,46 @@ ls transcripts/ | head -10
 
 ---
 
-## How to Schedule
+## How It Runs (Automated)
 
-Use Claude Code's `/schedule` skill or cron to run:
+A CRON job fires every 5 minutes and handles the full workflow automatically:
 
-```bash
-cd /path/to/TC-claude-skills/market-monday-transcripts && python execution/02_fetch_batch.py --count 5 >> .tmp/batch.log 2>&1
+```
+*/5 * * * * /home/ubuntu/.claude/skills/market-monday-transcripts/execution/05_scheduled_run.sh \
+            >> /home/ubuntu/.claude/skills/market-monday-transcripts/.tmp/scheduled_run.log 2>&1
 ```
 
-**Recommended schedule:** Every 3 minutes
-**Batch size:** 5 (adjust down to 2-3 if errors appear)
+`05_scheduled_run.sh` does the following in sequence:
+1. **Concurrency guard** — exits immediately if another instance is already running (flock-based, race-free)
+2. **Daily masterlist refresh** — runs `01_fetch_playlist.py` if `master_list.csv` is older than 23 hours, picking up any new EYL episodes automatically
+3. **Early exit if nothing to do** — if 0 pending episodes, the script exits cleanly without running anything
+4. **Batch fetch** — runs `02_fetch_batch.py --count 5` to process the next 5 pending episodes
+5. **OneDrive rsync** — syncs `transcripts/` and `master_list.csv` to `onedrive:Backups/oracle-server/market-monday-transcripts/`
 
-Stop when `python execution/03_status_report.py` shows 0 pending.
+**You don't need to do anything to keep this running.** New EYL Market Monday episodes are auto-detected within 24 hours of release and processed within 5 minutes of detection.
+
+### Manual override (run a batch right now)
+```bash
+cd /home/ubuntu/.claude/skills/market-monday-transcripts
+.venv/bin/python execution/02_fetch_batch.py --count 5
+```
+
+### Check progress
+```bash
+cd /home/ubuntu/.claude/skills/market-monday-transcripts
+.venv/bin/python execution/03_status_report.py
+```
+
+### Check scheduler log
+```bash
+tail -50 /home/ubuntu/.claude/skills/market-monday-transcripts/.tmp/scheduled_run.log
+```
+
+### Trigger a manual playlist refresh (check for new episodes now)
+```bash
+cd /home/ubuntu/.claude/skills/market-monday-transcripts
+.venv/bin/python execution/01_fetch_playlist.py
+```
 
 ---
 
