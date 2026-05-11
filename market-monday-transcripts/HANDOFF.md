@@ -7,7 +7,7 @@ to run batches on a schedule until all episodes are done.
 
 **Playlist:** https://www.youtube.com/playlist?list=PLXa8HXFcKT961IieWfhylPvBNeH2cO8dY
 **Total episodes:** ~313 (check `data/master_list.csv` for current count)
-**Project dir:** `TC-claude-skills/market-monday-transcripts/`
+**Project dir:** `~/.claude/skills/market-monday-transcripts/`
 
 ---
 

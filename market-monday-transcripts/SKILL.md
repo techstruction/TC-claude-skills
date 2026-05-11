@@ -40,7 +40,7 @@ python execution/02_fetch_batch.py --count 5 --start-from 50
 ## Phase Guide
 
 ### Phase 1: Initialize (one time)
-1. `cd TC-claude-skills/market-monday-transcripts`
+1. `cd ~/.claude/skills/market-monday-transcripts`
 2. `pip install yt-dlp youtube-transcript-api`
 3. `python execution/01_fetch_playlist.py`
 4. Verify: `python execution/03_status_report.py`

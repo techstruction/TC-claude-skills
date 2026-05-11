@@ -8,7 +8,11 @@ A skill + execution system to extract all transcripts from the Earn Your Leisure
 https://www.youtube.com/playlist?list=PLXa8HXFcKT961IieWfhylPvBNeH2cO8dY
 
 ## Working Directory
-`TC-claude-skills/market-monday-transcripts/`
+`~/.claude/skills/market-monday-transcripts/`
+
+> **Note for developers:** This is the runtime directory where data lives (transcripts/,
+> data/master_list.csv, .venv/). This git repo (`TC-claude-skills/`) contains the
+> version-controlled scripts. Always run scripts from the runtime directory.
 
 ## Core Rules
 
